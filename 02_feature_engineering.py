@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 import os
-from config import DATA_DIR
+from config import DATA_DIR, TARGET_THRESHOLD
 
 
 def add_log_return(df: pd.DataFrame) -> pd.DataFrame:
@@ -54,8 +54,25 @@ def add_bollinger(df: pd.DataFrame, window=20, num_std=2) -> pd.DataFrame:
 
 
 def add_target(df: pd.DataFrame) -> pd.DataFrame:
-    """다음 날 주가 방향 (1: 상승, 0: 하락/보합)"""
-    df["target"] = (df["close"].shift(-1) > df["close"]).astype(int)
+    """
+    Target threshold 기반 다음 날 주가 방향 생성
+
+    1: 다음 날 수익률이 TARGET_THRESHOLD보다 큰 경우
+    0: 다음 날 수익률이 -TARGET_THRESHOLD보다 작은 경우
+    NaN: 변동폭이 작아 노이즈성 횡보로 보는 경우
+    """
+    # 다음 날 수익률 계산
+    df["future_return"] = df["close"].shift(-1) / df["close"] - 1
+
+    # target 초기화
+    df["target"] = np.nan
+
+    # 기준값 이상 상승한 경우 상승 class
+    df.loc[df["future_return"] > TARGET_THRESHOLD, "target"] = 1
+
+    # 기준값 이상 하락한 경우 하락 class
+    df.loc[df["future_return"] < -TARGET_THRESHOLD, "target"] = 0
+
     return df
 
 
