@@ -14,7 +14,13 @@ FEATURE_COLS = [
     "sma_5", "sma_20", "sma_60",
     "rsi", "macd", "macd_signal", "macd_hist",
     "bb_upper", "bb_lower", "bb_width",
+
+    # 기본 감성 피처
     "sentiment_mean", "sentiment_std", "news_count",
+
+    # 감성 파생 피처
+    "sentiment_lag1", "sentiment_lag2",
+    "sentiment_change", "news_count_zscore_20",
 ]
 
 
@@ -52,10 +58,21 @@ def main():
         validate="one_to_one"
     )
 
-    # 뉴스가 없는 날은 감성 정보가 없다는 뜻이므로 0으로 채움
-    df["sentiment_mean"] = df["sentiment_mean"].fillna(0)
-    df["sentiment_std"] = df["sentiment_std"].fillna(0)
-    df["news_count"] = df["news_count"].fillna(0)
+    sentiment_cols = [
+        "sentiment_mean",
+        "sentiment_std",
+        "news_count",
+        "sentiment_lag1",
+        "sentiment_lag2",
+        "sentiment_change",
+        "news_count_zscore_20",
+    ]
+
+    for col in sentiment_cols:
+        if col not in df.columns:
+            df[col] = 0
+    
+    df[sentiment_cols] = df[sentiment_cols].fillna(0)
 
     # 가격·기술지표·target에 결측치가 있으면 모델 입력에 부적절하므로 제거
     df = df.dropna(subset=FEATURE_COLS + ["target"])

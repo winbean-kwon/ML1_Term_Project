@@ -49,6 +49,69 @@ def compute_sentiment_score(row: dict) -> float:
     """감성 점수를 단일 스칼라로 변환 (positive - negative)"""
     return row["positive"] - row["negative"]
 
+def add_sentiment_time_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    종목별 일별 감성 데이터에 시계열 파생 피처를 추가합니다.
+
+    추가 피처:
+    - sentiment_lag1: 1일 전 감성 평균
+    - sentiment_lag2: 2일 전 감성 평균
+    - sentiment_change: 전날 대비 감성 변화량
+    - news_count_zscore_20: 최근 20일 기준 뉴스 집중도 z-score
+    """
+    df = df.copy()
+
+    # 종목코드와 날짜 형식 정리
+    df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+
+    # 종목별 날짜순 정렬
+    df = df.sort_values(["종목코드", "date"]).reset_index(drop=True)
+
+    # 기본 감성 컬럼 결측 처리
+    base_cols = ["sentiment_mean", "sentiment_std", "news_count"]
+    for col in base_cols:
+        df[col] = df[col].fillna(0)
+
+    group = df.groupby("종목코드", group_keys=False)
+
+    # 1일 전, 2일 전 감성값
+    df["sentiment_lag1"] = group["sentiment_mean"].shift(1)
+    df["sentiment_lag2"] = group["sentiment_mean"].shift(2)
+
+    # 전날 대비 감성 변화량
+    df["sentiment_change"] = group["sentiment_mean"].diff()
+
+    # 최근 20일 기준 뉴스 개수 rolling 평균/표준편차
+    # 현재 날짜의 news_count가 기준 계산에 들어가지 않도록 shift(1) 사용
+    rolling_mean_20 = group["news_count"].transform(
+        lambda x: x.shift(1).rolling(window=20, min_periods=5).mean()
+    )
+
+    rolling_std_20 = group["news_count"].transform(
+        lambda x: x.shift(1).rolling(window=20, min_periods=5).std()
+    )
+
+    # 평소 뉴스량 대비 오늘 뉴스가 얼마나 몰렸는지 계산
+    df["news_count_zscore_20"] = (
+        (df["news_count"] - rolling_mean_20) / (rolling_std_20 + 1e-6)
+    )
+
+    # 초반 구간 NaN, 표준편차 0 등으로 생기는 결측/무한대 처리
+    new_cols = [
+        "sentiment_lag1",
+        "sentiment_lag2",
+        "sentiment_change",
+        "news_count_zscore_20",
+    ]
+
+    df[new_cols] = (
+        df[new_cols]
+        .replace([np.inf, -np.inf], 0)
+        .fillna(0)
+    )
+
+    return df    
 
 def main():
     # 뉴스 데이터 로드
@@ -75,6 +138,9 @@ def main():
         df_news["날짜"].str.strip().str[:10], format="%Y.%m.%d", errors="coerce"
     )
 
+    # 날짜 파싱에 실패한 뉴스는 집계에서 제외
+    df_news = df_news.dropna(subset=["date"])
+
     # 종목코드·날짜별 감성 점수 집계
     daily_sentiment = df_news.groupby(["종목코드", "date"]).agg(
         sentiment_mean=("sentiment_score", "mean"),
@@ -85,10 +151,13 @@ def main():
     daily_sentiment["종목코드"] = daily_sentiment["종목코드"].astype(str).str.zfill(6)
     daily_sentiment["sentiment_std"] = daily_sentiment["sentiment_std"].fillna(0)
 
+    # 감성 시계열 파생 피처 추가
+    daily_sentiment = add_sentiment_time_features(daily_sentiment)
+
     output_path = os.path.join(DATA_DIR, "sentiment.csv")
     daily_sentiment.to_csv(output_path, index=False, encoding="utf-8-sig")
     print(f"저장 완료: {output_path} ({len(daily_sentiment)}행)")
-
-
+    
+    
 if __name__ == "__main__":
     main()
