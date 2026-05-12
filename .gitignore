@@ -2,9 +2,12 @@
 data/
 *.csv
 !kospi_stock_codes.csv
+*.npz
 
 # Models
 models/
+*.pt
+*.pkl
 
 # Python
 __pycache__/
