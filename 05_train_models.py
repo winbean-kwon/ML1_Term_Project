@@ -3,6 +3,7 @@ ARIMA, LSTM, Transformer 모델 학습 및 비교
 
 각 모델을 학습하고 예측 결과를 저장합니다.
 """
+
 import numpy as np
 import pandas as pd
 import os
@@ -26,27 +27,64 @@ def load_dataset():
 
 
 # ──────────────────────────────────────
-# 1. ARIMA (로그수익률 기반, 종목별 개별 학습)
+# 공통: batch 단위 예측
+# ──────────────────────────────────────
+
+def predict_in_batches(model, X_test, device, batch_size=256):
+    """
+    X_test 전체를 한 번에 GPU에 올리지 않고,
+    batch 단위로 나누어 예측합니다.
+    """
+    model.eval()
+
+    test_ds = TensorDataset(torch.FloatTensor(X_test))
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False
+    )
+
+    preds_list = []
+
+    with torch.no_grad():
+        for (xb,) in test_loader:
+            xb = xb.to(device)
+
+            logits = model(xb)
+
+            preds_batch = (
+                torch.sigmoid(logits) > 0.5
+            ).cpu().numpy().astype(int)
+
+            preds_list.append(preds_batch)
+
+    preds = np.concatenate(preds_list)
+
+    return preds
+
+
+# ──────────────────────────────────────
+# 1. ARIMA
 # ──────────────────────────────────────
 
 def train_arima(X_train, X_test, y_train, y_test):
     """
     ARIMA는 시계열 회귀 모델이므로 로그수익률을 예측한 뒤
     부호로 방향(상승/하락)을 분류합니다.
-    TODO: 종목별로 분리하여 학습하도록 확장
+
+    현재 구현은 간단한 baseline입니다.
     """
     from statsmodels.tsa.arima.model import ARIMA
 
-    # 간단 버전: 마지막 윈도우의 log_return(첫 번째 피처)만 사용
     log_return_idx = 0
-    train_series = X_train[:, -1, log_return_idx]  # 각 샘플의 마지막 시점 로그수익률
+    train_series = X_train[:, -1, log_return_idx]
 
-    # ARIMA(5,1,0) 학습
     try:
         model = ARIMA(train_series, order=(5, 1, 0))
         fitted = model.fit()
         forecast = fitted.forecast(steps=len(y_test))
         preds = (forecast > 0).astype(int)
+
     except Exception as e:
         print(f"ARIMA 학습 실패: {e}")
         preds = np.zeros(len(y_test), dtype=int)
@@ -61,8 +99,15 @@ def train_arima(X_train, X_test, y_train, y_test):
 class LSTMClassifier(nn.Module):
     def __init__(self, input_size, hidden_size=64, num_layers=2, dropout=0.2):
         super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
-                            batch_first=True, dropout=dropout)
+
+        self.lstm = nn.LSTM(
+            input_size,
+            hidden_size,
+            num_layers,
+            batch_first=True,
+            dropout=dropout
+        )
+
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
@@ -71,39 +116,67 @@ class LSTMClassifier(nn.Module):
         return out.squeeze(-1)
 
 
-def train_lstm(X_train, X_test, y_train, y_test,
-               epochs=20, batch_size=256, lr=1e-3):
+def train_lstm(
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    epochs=20,
+    batch_size=256,
+    lr=1e-3
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = X_train.shape[2]
 
     train_ds = TensorDataset(
-        torch.FloatTensor(X_train), torch.FloatTensor(y_train))
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+        torch.FloatTensor(X_train),
+        torch.FloatTensor(y_train)
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True
+    )
 
     model = LSTMClassifier(input_size).to(device)
+
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     model.train()
+
     for epoch in range(epochs):
         total_loss = 0
+
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
+
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+
+            logits = model(xb)
+            loss = criterion(logits, yb)
+
             loss.backward()
             optimizer.step()
+
             total_loss += loss.item()
-        print(f"  LSTM Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(train_loader):.4f}")
 
-    # 예측
-    model.eval()
-    with torch.no_grad():
-        logits = model(torch.FloatTensor(X_test).to(device))
-        preds = (torch.sigmoid(logits) > 0.5).cpu().numpy().astype(int)
+        print(
+            f"  LSTM Epoch {epoch + 1}/{epochs}, "
+            f"Loss: {total_loss / len(train_loader):.4f}"
+        )
 
-    # 모델 저장
+    # batch 단위 예측
+    preds = predict_in_batches(
+        model,
+        X_test,
+        device,
+        batch_size=batch_size
+    )
+
     torch.save(model.state_dict(), os.path.join(MODEL_DIR, "lstm.pt"))
+
     return preds
 
 
@@ -112,53 +185,101 @@ def train_lstm(X_train, X_test, y_train, y_test,
 # ──────────────────────────────────────
 
 class TransformerClassifier(nn.Module):
-    def __init__(self, input_size, d_model=64, nhead=4, num_layers=2, dropout=0.1):
+    def __init__(
+        self,
+        input_size,
+        d_model=64,
+        nhead=4,
+        num_layers=2,
+        dropout=0.1
+    ):
         super().__init__()
+
         self.input_proj = nn.Linear(input_size, d_model)
+
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, dim_feedforward=128,
-            dropout=dropout, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=128,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers
+        )
+
         self.fc = nn.Linear(d_model, 1)
 
     def forward(self, x):
         x = self.input_proj(x)
         x = self.encoder(x)
-        x = x[:, -1, :]  # 마지막 시점
+        x = x[:, -1, :]
         return self.fc(x).squeeze(-1)
 
 
-def train_transformer(X_train, X_test, y_train, y_test,
-                      epochs=20, batch_size=256, lr=1e-3):
+def train_transformer(
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    epochs=20,
+    batch_size=256,
+    lr=1e-3
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = X_train.shape[2]
 
     train_ds = TensorDataset(
-        torch.FloatTensor(X_train), torch.FloatTensor(y_train))
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+        torch.FloatTensor(X_train),
+        torch.FloatTensor(y_train)
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True
+    )
 
     model = TransformerClassifier(input_size).to(device)
+
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     model.train()
+
     for epoch in range(epochs):
         total_loss = 0
+
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
+
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+
+            logits = model(xb)
+            loss = criterion(logits, yb)
+
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
-        print(f"  Transformer Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(train_loader):.4f}")
 
-    model.eval()
-    with torch.no_grad():
-        logits = model(torch.FloatTensor(X_test).to(device))
-        preds = (torch.sigmoid(logits) > 0.5).cpu().numpy().astype(int)
+            total_loss += loss.item()
+
+        print(
+            f"  Transformer Epoch {epoch + 1}/{epochs}, "
+            f"Loss: {total_loss / len(train_loader):.4f}"
+        )
+
+    # batch 단위 예측
+    preds = predict_in_batches(
+        model,
+        X_test,
+        device,
+        batch_size=batch_size
+    )
 
     torch.save(model.state_dict(), os.path.join(MODEL_DIR, "transformer.pt"))
+
     return preds
 
 
@@ -168,6 +289,7 @@ def train_transformer(X_train, X_test, y_train, y_test,
 
 def main():
     X_train, X_test, y_train, y_test = load_dataset()
+
     print(f"데이터 로드: Train={X_train.shape}, Test={X_test.shape}")
 
     results = {}
@@ -179,11 +301,21 @@ def main():
     results["lstm"] = train_lstm(X_train, X_test, y_train, y_test)
 
     print("\n[3/3] Transformer 학습...")
-    results["transformer"] = train_transformer(X_train, X_test, y_train, y_test)
+    results["transformer"] = train_transformer(
+        X_train,
+        X_test,
+        y_train,
+        y_test
+    )
 
-    # 예측 결과 저장
     pred_path = os.path.join(DATA_DIR, "predictions.npz")
-    np.savez(pred_path, y_test=y_test, **results)
+
+    np.savez(
+        pred_path,
+        y_test=y_test,
+        **results
+    )
+
     print(f"\n예측 결과 저장: {pred_path}")
 
 
