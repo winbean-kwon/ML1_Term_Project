@@ -2,7 +2,7 @@
 모델 평가 결과 시각화
 
 사용법:
-    python 07_visualize_results.py
+    python 07_visualization.py
 """
 
 import os
