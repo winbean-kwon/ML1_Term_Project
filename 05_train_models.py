@@ -112,7 +112,7 @@ def train_arima(X_train, X_test, y_train, y_test):
 # ──────────────────────────────────────
 
 class LSTMClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size=64, num_layers=2, dropout=0.2):
+    def __init__(self, input_size, hidden_size=128, num_layers=2, dropout=0.3):
         super().__init__()
 
         self.lstm = nn.LSTM(
@@ -136,51 +136,74 @@ def train_lstm(
     X_test,
     y_train,
     y_test,
-    epochs=20,
+    epochs=30,
     batch_size=256,
-    lr=1e-3
+    lr=1e-3,
+    patience=5
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = X_train.shape[2]
 
-    train_ds = TensorDataset(
-        torch.FloatTensor(X_train),
-        torch.FloatTensor(y_train)
-    )
+    n_val = max(1, int(len(X_train) * 0.1))
+    X_tr, X_val = X_train[:-n_val], X_train[-n_val:]
+    y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
 
     train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True
+        TensorDataset(torch.FloatTensor(X_tr), torch.FloatTensor(y_tr)),
+        batch_size=batch_size, shuffle=True
+    )
+    val_loader = DataLoader(
+        TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val)),
+        batch_size=batch_size * 2, shuffle=False
     )
 
     model = LSTMClassifier(input_size).to(device)
 
-    criterion = nn.BCEWithLogitsLoss()
+    pos_w = torch.tensor(
+        [(y_tr == 0).sum() / max((y_tr == 1).sum(), 1)], dtype=torch.float32
+    ).to(device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    model.train()
+    best_val_loss = float("inf")
+    best_state = None
+    no_improve = 0
 
     for epoch in range(epochs):
+        model.train()
         total_loss = 0
 
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
-
             optimizer.zero_grad()
-
-            logits = model(xb)
-            loss = criterion(logits, yb)
-
+            loss = criterion(model(xb), yb)
             loss.backward()
             optimizer.step()
-
             total_loss += loss.item()
+
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                val_loss += criterion(model(xb.to(device)), yb.to(device)).item()
+        val_loss /= len(val_loader)
 
         print(
             f"  LSTM Epoch {epoch + 1}/{epochs}, "
-            f"Loss: {total_loss / len(train_loader):.4f}"
+            f"train={total_loss / len(train_loader):.4f}  val={val_loss:.4f}"
         )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                print(f"  → Early stopping (best val={best_val_loss:.4f})")
+                break
+
+    model.load_state_dict(best_state)
 
     # batch 단위 예측
     preds = predict_in_batches(
@@ -203,7 +226,7 @@ class TransformerClassifier(nn.Module):
     def __init__(
         self,
         input_size,
-        d_model=64,
+        d_model=128,
         nhead=4,
         num_layers=2,
         dropout=0.1
@@ -215,7 +238,7 @@ class TransformerClassifier(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
-            dim_feedforward=128,
+            dim_feedforward=256,
             dropout=dropout,
             batch_first=True
         )
@@ -239,51 +262,74 @@ def train_transformer(
     X_test,
     y_train,
     y_test,
-    epochs=20,
+    epochs=30,
     batch_size=256,
-    lr=1e-3
+    lr=1e-3,
+    patience=5
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = X_train.shape[2]
 
-    train_ds = TensorDataset(
-        torch.FloatTensor(X_train),
-        torch.FloatTensor(y_train)
-    )
+    n_val = max(1, int(len(X_train) * 0.1))
+    X_tr, X_val = X_train[:-n_val], X_train[-n_val:]
+    y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
 
     train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True
+        TensorDataset(torch.FloatTensor(X_tr), torch.FloatTensor(y_tr)),
+        batch_size=batch_size, shuffle=True
+    )
+    val_loader = DataLoader(
+        TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val)),
+        batch_size=batch_size * 2, shuffle=False
     )
 
     model = TransformerClassifier(input_size).to(device)
 
-    criterion = nn.BCEWithLogitsLoss()
+    pos_w = torch.tensor(
+        [(y_tr == 0).sum() / max((y_tr == 1).sum(), 1)], dtype=torch.float32
+    ).to(device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    model.train()
+    best_val_loss = float("inf")
+    best_state = None
+    no_improve = 0
 
     for epoch in range(epochs):
+        model.train()
         total_loss = 0
 
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
-
             optimizer.zero_grad()
-
-            logits = model(xb)
-            loss = criterion(logits, yb)
-
+            loss = criterion(model(xb), yb)
             loss.backward()
             optimizer.step()
-
             total_loss += loss.item()
+
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                val_loss += criterion(model(xb.to(device)), yb.to(device)).item()
+        val_loss /= len(val_loader)
 
         print(
             f"  Transformer Epoch {epoch + 1}/{epochs}, "
-            f"Loss: {total_loss / len(train_loader):.4f}"
+            f"train={total_loss / len(train_loader):.4f}  val={val_loss:.4f}"
         )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                print(f"  → Early stopping (best val={best_val_loss:.4f})")
+                break
+
+    model.load_state_dict(best_state)
 
     # batch 단위 예측
     preds = predict_in_batches(
