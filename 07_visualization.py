@@ -10,6 +10,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['font.family'] = 'sans-serif'
+
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -133,6 +136,7 @@ def plot_confusion_matrices(pred_data, y_test):
         save_path = os.path.join(RESULT_DIR, f"{name}_confusion_matrix.png")
         plt.savefig(save_path, dpi=150)
         plt.show()
+        plt.close(fig)
 
         print(f"저장 완료: {save_path}")
 
