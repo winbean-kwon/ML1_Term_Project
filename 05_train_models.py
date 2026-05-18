@@ -164,6 +164,9 @@ def train_lstm(
     ).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=2
+    )
 
     best_val_loss = float("inf")
     best_state = None
@@ -178,6 +181,7 @@ def train_lstm(
             optimizer.zero_grad()
             loss = criterion(model(xb), yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             total_loss += loss.item()
 
@@ -188,9 +192,12 @@ def train_lstm(
                 val_loss += criterion(model(xb.to(device)), yb.to(device)).item()
         val_loss /= len(val_loader)
 
+        scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]["lr"]
+
         print(
             f"  LSTM Epoch {epoch + 1}/{epochs}, "
-            f"train={total_loss / len(train_loader):.4f}  val={val_loss:.4f}"
+            f"train={total_loss / len(train_loader):.4f}  val={val_loss:.4f}  lr={current_lr:.1e}"
         )
 
         if val_loss < best_val_loss:
@@ -290,6 +297,9 @@ def train_transformer(
     ).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=2
+    )
 
     best_val_loss = float("inf")
     best_state = None
@@ -304,6 +314,7 @@ def train_transformer(
             optimizer.zero_grad()
             loss = criterion(model(xb), yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             total_loss += loss.item()
 
@@ -314,9 +325,12 @@ def train_transformer(
                 val_loss += criterion(model(xb.to(device)), yb.to(device)).item()
         val_loss /= len(val_loader)
 
+        scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]["lr"]
+
         print(
             f"  Transformer Epoch {epoch + 1}/{epochs}, "
-            f"train={total_loss / len(train_loader):.4f}  val={val_loss:.4f}"
+            f"train={total_loss / len(train_loader):.4f}  val={val_loss:.4f}  lr={current_lr:.1e}"
         )
 
         if val_loss < best_val_loss:
