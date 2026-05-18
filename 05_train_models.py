@@ -69,21 +69,36 @@ def predict_in_batches(model, X_test, device, batch_size=256):
 
 def train_arima(X_train, X_test, y_train, y_test):
     """
-    ARIMA는 시계열 회귀 모델이므로 로그수익률을 예측한 뒤
-    부호로 방향(상승/하락)을 분류합니다.
+    AR(5) baseline: train 데이터로 AR 계수를 추정하고
+    각 test 윈도우에 벡터화 적용해 1-step 예측으로 방향을 분류합니다.
 
-    현재 구현은 간단한 baseline입니다.
+    - 로그수익률은 이미 정상성이므로 차분(d) 없이 AR(5) 사용
+    - 각 test 샘플의 윈도우 마지막 p개 값으로 1-step 예측 수행
+    - train 시계열 평균을 임계값으로 사용 (MinMax 정규화 공간 기준)
     """
-    from statsmodels.tsa.arima.model import ARIMA
+    from statsmodels.tsa.ar_model import AutoReg
 
+    p = 5
     log_return_idx = 0
+
+    # 각 train 윈도우 마지막 타임스텝의 log_return으로 시계열 구성
     train_series = X_train[:, -1, log_return_idx]
+    neutral = float(np.mean(train_series))
 
     try:
-        model = ARIMA(train_series, order=(5, 1, 0))
+        model = AutoReg(train_series, lags=p, old_names=False)
         fitted = model.fit()
-        forecast = fitted.forecast(steps=len(y_test))
-        preds = (forecast > 0).astype(int)
+
+        intercept = fitted.params[0]
+        ar_coefs = fitted.params[1:]  # [phi_1, ..., phi_p], phi_1이 lag-1 계수
+
+        # test 윈도우 마지막 p개 값: shape (N, p), 오래된 → 최신 순
+        test_windows = X_test[:, -p:, log_return_idx]
+
+        # AR 예측: intercept + phi_p*y(t-p) + ... + phi_1*y(t-1)
+        forecasts = intercept + test_windows @ ar_coefs[::-1]
+
+        preds = (forecasts > neutral).astype(int)
 
     except Exception as e:
         print(f"ARIMA 학습 실패: {e}")
