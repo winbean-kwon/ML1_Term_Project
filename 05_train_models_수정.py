@@ -33,10 +33,17 @@ def load_dataset():
 # 공통: batch 단위 예측
 # ──────────────────────────────────────
 
-def predict_in_batches(model, X_test, device, batch_size=256):
+def predict_in_batches(model, X_test, device, batch_size=256, threshold=0.5):
     """
     X_test 전체를 한 번에 GPU에 올리지 않고,
     batch 단위로 나누어 예측합니다.
+
+    Returns
+    -------
+    preds : np.ndarray
+        threshold 기준 0/1 예측값
+    probs : np.ndarray
+        sigmoid 확률값
     """
     model.eval()
 
@@ -48,23 +55,23 @@ def predict_in_batches(model, X_test, device, batch_size=256):
     )
 
     preds_list = []
+    probs_list = []
 
     with torch.no_grad():
         for (xb,) in test_loader:
             xb = xb.to(device)
 
             logits = model(xb)
+            probs_batch = torch.sigmoid(logits).cpu().numpy()
+            preds_batch = (probs_batch > threshold).astype(int)
 
-            preds_batch = (
-                torch.sigmoid(logits) > 0.5
-            ).cpu().numpy().astype(int)
-
+            probs_list.append(probs_batch)
             preds_list.append(preds_batch)
 
+    probs = np.concatenate(probs_list)
     preds = np.concatenate(preds_list)
 
-    return preds
-
+    return preds, probs
 
 # ──────────────────────────────────────
 # 1. ARIMA
@@ -216,13 +223,17 @@ def train_lstm(
 
     model.load_state_dict(best_state)
 
-    preds = predict_in_batches(model, X_test, device, batch_size=batch_size)
-
-    torch.save(model.state_dict(), os.path.join(MODEL_DIR, "lstm.pt"))
-    print(f"  모델 저장: {os.path.join(MODEL_DIR, 'lstm.pt')}")
-
-    return preds
-
+    preds, probs = predict_in_batches(
+        
+        model,
+        X_test,
+        device,
+        batch_size=batch_size
+    )
+    
+    torch.save(model.state_dict(), os.path.join(MODEL_DIR, "transformer.pt"))
+    return preds, probs
+    
 
 # ──────────────────────────────────────
 # 3. Transformer
@@ -345,12 +356,15 @@ def train_transformer(
 
     model.load_state_dict(best_state)
 
-    preds = predict_in_batches(model, X_test, device, batch_size=batch_size)
-
+    preds, probs = predict_in_batches(
+        model,
+        X_test,
+        device,
+        batch_size=batch_size
+    )
+    
     torch.save(model.state_dict(), os.path.join(MODEL_DIR, "transformer.pt"))
-    print(f"  모델 저장: {os.path.join(MODEL_DIR, 'transformer.pt')}")
-
-    return preds
+    return preds, probs
 
 
 # ──────────────────────────────────────
@@ -368,15 +382,19 @@ def main():
     results["arima"] = train_arima(X_train, X_test, y_train, y_test)
 
     print("\n[2/3] LSTM 학습...")
-    results["lstm"] = train_lstm(X_train, X_test, y_train, y_test)
+    lstm_pred, lstm_proba = train_lstm(X_train, X_test, y_train, y_test)
+    results["lstm"] = lstm_pred
+    results["lstm_proba"] = lstm_proba
 
-    print("\n[3/3] Transformer 학습...")
-    results["transformer"] = train_transformer(
+    print("\n[3/3] Transformer 학습...") 
+    transformer_pred, transformer_proba = train_transformer(
         X_train,
         X_test,
         y_train,
         y_test
     )
+    results["transformer"] = transformer_pred
+    results["transformer_proba"] = transformer_proba
 
     pred_path = os.path.join(DATA_DIR, "predictions.npz")
 
