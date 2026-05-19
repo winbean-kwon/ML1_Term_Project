@@ -246,31 +246,49 @@ class TransformerClassifier(nn.Module):
         d_model=128,
         nhead=4,
         num_layers=2,
-        dropout=0.1
+        dim_feedforward=256,
+        dropout=0.2,
+        pooling="mean",
     ):
         super().__init__()
+
+        self.pooling = pooling
 
         self.input_proj = nn.Linear(input_size, d_model)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
-            dim_feedforward=256,
+            dim_feedforward=dim_feedforward,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
         )
 
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
-            num_layers=num_layers
+            num_layers=num_layers,
         )
 
         self.fc = nn.Linear(d_model, 1)
 
     def forward(self, x):
+        """
+        x shape: (batch_size, sequence_length, input_size)
+        """
         x = self.input_proj(x)
         x = self.encoder(x)
-        x = x[:, -1, :]
+
+        if self.pooling == "last":
+            # 기존 방식: 마지막 시점만 사용
+            x = x[:, -1, :]
+
+        elif self.pooling == "mean":
+            # 개선 방식: 전체 시퀀스의 정보를 평균으로 요약
+            x = x.mean(dim=1)
+
+        else:
+            raise ValueError(f"Unknown pooling method: {self.pooling}")
+
         return self.fc(x).squeeze(-1)
 
 
@@ -281,7 +299,7 @@ def train_transformer(
     y_test,
     epochs=30,
     batch_size=256,
-    lr=1e-3,
+    lr=3e-4,
     patience=5
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -301,13 +319,25 @@ def train_transformer(
         batch_size=batch_size * 2, shuffle=False
     )
 
-    model = TransformerClassifier(input_size).to(device)
+    model = TransformerClassifier(
+        input_size=input_size,
+        d_model=128,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=256,
+        dropout=0.2,
+        pooling="mean",
+    ).to(device)
 
     pos_w = torch.tensor(
         [(y_tr == 0).sum() / max((y_tr == 1).sum(), 1)], dtype=torch.float32
     ).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=lr,
+        weight_decay=1e-4,
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=2
     )
@@ -363,7 +393,7 @@ def train_transformer(
         batch_size=batch_size
     )
     
-    torch.save(model.state_dict(), os.path.join(MODEL_DIR, "transformer.pt"))
+    torch.save(model.state_dict(), os.path.join(MODEL_DIR, "transformer_mean_pooling.pt"))
     return preds, probs
 
 
