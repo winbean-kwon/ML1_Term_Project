@@ -2,6 +2,9 @@
 ARIMA, LSTM, Transformer 모델 학습 및 비교
 
 각 모델을 학습하고 예측 결과를 저장합니다.
+
+실행법:
+    python 05_train_models.py
 """
 
 import numpy as np
@@ -30,10 +33,17 @@ def load_dataset():
 # 공통: batch 단위 예측
 # ──────────────────────────────────────
 
-def predict_in_batches(model, X_test, device, batch_size=256):
+def predict_in_batches(model, X_test, device, batch_size=256, threshold=0.5):
     """
     X_test 전체를 한 번에 GPU에 올리지 않고,
     batch 단위로 나누어 예측합니다.
+
+    Returns
+    -------
+    preds : np.ndarray
+        threshold 기준 0/1 예측값
+    probs : np.ndarray
+        sigmoid 확률값
     """
     model.eval()
 
@@ -45,23 +55,23 @@ def predict_in_batches(model, X_test, device, batch_size=256):
     )
 
     preds_list = []
+    probs_list = []
 
     with torch.no_grad():
         for (xb,) in test_loader:
             xb = xb.to(device)
 
             logits = model(xb)
+            probs_batch = torch.sigmoid(logits).cpu().numpy()
+            preds_batch = (probs_batch > threshold).astype(int)
 
-            preds_batch = (
-                torch.sigmoid(logits) > 0.5
-            ).cpu().numpy().astype(int)
-
+            probs_list.append(probs_batch)
             preds_list.append(preds_batch)
 
+    probs = np.concatenate(probs_list)
     preds = np.concatenate(preds_list)
 
-    return preds
-
+    return preds, probs
 
 # ──────────────────────────────────────
 # 1. ARIMA
@@ -142,6 +152,7 @@ def train_lstm(
     patience=5
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"  사용 디바이스: {device}")
     input_size = X_train.shape[2]
 
     n_val = max(1, int(len(X_train) * 0.1))
@@ -212,18 +223,17 @@ def train_lstm(
 
     model.load_state_dict(best_state)
 
-    # batch 단위 예측
-    preds = predict_in_batches(
+    preds, probs = predict_in_batches(
+        
         model,
         X_test,
         device,
         batch_size=batch_size
     )
-
-    torch.save(model.state_dict(), os.path.join(MODEL_DIR, "lstm.pt"))
-
-    return preds
-
+    
+    torch.save(model.state_dict(), os.path.join(MODEL_DIR, "transformer.pt"))
+    return preds, probs
+    
 
 # ──────────────────────────────────────
 # 3. Transformer
@@ -236,31 +246,49 @@ class TransformerClassifier(nn.Module):
         d_model=128,
         nhead=4,
         num_layers=2,
-        dropout=0.1
+        dim_feedforward=256,
+        dropout=0.2,
+        pooling="mean",
     ):
         super().__init__()
+
+        self.pooling = pooling
 
         self.input_proj = nn.Linear(input_size, d_model)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
-            dim_feedforward=256,
+            dim_feedforward=dim_feedforward,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
         )
 
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
-            num_layers=num_layers
+            num_layers=num_layers,
         )
 
         self.fc = nn.Linear(d_model, 1)
 
     def forward(self, x):
+        """
+        x shape: (batch_size, sequence_length, input_size)
+        """
         x = self.input_proj(x)
         x = self.encoder(x)
-        x = x[:, -1, :]
+
+        if self.pooling == "last":
+            # 기존 방식: 마지막 시점만 사용
+            x = x[:, -1, :]
+
+        elif self.pooling == "mean":
+            # 개선 방식: 전체 시퀀스의 정보를 평균으로 요약
+            x = x.mean(dim=1)
+
+        else:
+            raise ValueError(f"Unknown pooling method: {self.pooling}")
+
         return self.fc(x).squeeze(-1)
 
 
@@ -271,10 +299,11 @@ def train_transformer(
     y_test,
     epochs=30,
     batch_size=256,
-    lr=1e-3,
+    lr=3e-4,
     patience=5
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"  사용 디바이스: {device}")
     input_size = X_train.shape[2]
 
     n_val = max(1, int(len(X_train) * 0.1))
@@ -290,13 +319,25 @@ def train_transformer(
         batch_size=batch_size * 2, shuffle=False
     )
 
-    model = TransformerClassifier(input_size).to(device)
+    model = TransformerClassifier(
+        input_size=input_size,
+        d_model=128,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=256,
+        dropout=0.2,
+        pooling="mean",
+    ).to(device)
 
     pos_w = torch.tensor(
         [(y_tr == 0).sum() / max((y_tr == 1).sum(), 1)], dtype=torch.float32
     ).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=lr,
+        weight_decay=1e-4,
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=2
     )
@@ -345,17 +386,15 @@ def train_transformer(
 
     model.load_state_dict(best_state)
 
-    # batch 단위 예측
-    preds = predict_in_batches(
+    preds, probs = predict_in_batches(
         model,
         X_test,
         device,
         batch_size=batch_size
     )
-
-    torch.save(model.state_dict(), os.path.join(MODEL_DIR, "transformer.pt"))
-
-    return preds
+    
+    torch.save(model.state_dict(), os.path.join(MODEL_DIR, "transformer_mean_pooling.pt"))
+    return preds, probs
 
 
 # ──────────────────────────────────────
@@ -373,15 +412,19 @@ def main():
     results["arima"] = train_arima(X_train, X_test, y_train, y_test)
 
     print("\n[2/3] LSTM 학습...")
-    results["lstm"] = train_lstm(X_train, X_test, y_train, y_test)
+    lstm_pred, lstm_proba = train_lstm(X_train, X_test, y_train, y_test)
+    results["lstm"] = lstm_pred
+    results["lstm_proba"] = lstm_proba
 
-    print("\n[3/3] Transformer 학습...")
-    results["transformer"] = train_transformer(
+    print("\n[3/3] Transformer 학습...") 
+    transformer_pred, transformer_proba = train_transformer(
         X_train,
         X_test,
         y_train,
         y_test
     )
+    results["transformer"] = transformer_pred
+    results["transformer_proba"] = transformer_proba
 
     pred_path = os.path.join(DATA_DIR, "predictions.npz")
 
