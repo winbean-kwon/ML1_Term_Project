@@ -30,12 +30,16 @@ os.makedirs(RESULT_DIR, exist_ok=True)
 
 
 def load_predictions():
-    """predictions.npz 로드"""
-    pred_path = os.path.join(DATA_DIR, "predictions.npz")
+    """predictions.npz 로드 (data/ 또는 프로젝트 루트에서 탐색)"""
+    candidates = [
+        os.path.join(DATA_DIR, "predictions.npz"),
+        os.path.join(BASE_DIR, "predictions.npz"),
+    ]
+    pred_path = next((p for p in candidates if os.path.exists(p)), None)
 
-    if not os.path.exists(pred_path):
+    if pred_path is None:
         raise FileNotFoundError(
-            f"predictions.npz 파일이 없습니다: {pred_path}\n"
+            "predictions.npz 파일이 없습니다.\n"
             "먼저 05_train_models.py를 실행하세요."
         )
 
@@ -86,7 +90,7 @@ def calculate_metrics(pred_data, y_test):
 
 
 def plot_metric_bar(df_metrics):
-    """Accuracy / Precision / Recall / F1-score 비교 막대그래프"""
+    """Accuracy / Precision / Recall / F1-score 비교 막대그래프 (랜덤 베이스라인 포함)"""
     metric_cols = ["accuracy", "precision", "recall", "f1_score"]
 
     x = np.arange(len(df_metrics))
@@ -102,8 +106,9 @@ def plot_metric_bar(df_metrics):
             label=col
         )
 
+    plt.axhline(y=0.5, color="red", linestyle="--", linewidth=1.2, label="Random Baseline (0.5)")
     plt.xticks(x, df_metrics["model"])
-    plt.ylim(0, 1)
+    plt.ylim(0.4, 0.75)
     plt.ylabel("Score")
     plt.title("Model Classification Performance")
     plt.legend()
@@ -139,6 +144,106 @@ def plot_confusion_matrices(pred_data, y_test):
         plt.close(fig)
 
         print(f"저장 완료: {save_path}")
+
+
+def plot_per_class_f1(pred_data, y_test):
+    """모델별 Down / Up 클래스 F1-score 분리 비교"""
+    from sklearn.metrics import f1_score as _f1
+
+    models, down_f1s, up_f1s = [], [], []
+
+    for name in get_model_names(pred_data):
+        y_pred = pred_data[name]
+        f1s = _f1(y_test, y_pred, average=None, zero_division=0)
+        models.append(name.upper())
+        down_f1s.append(f1s[0])
+        up_f1s.append(f1s[1] if len(f1s) > 1 else 0.0)
+
+    x = np.arange(len(models))
+    width = 0.35
+
+    plt.figure(figsize=(8, 5))
+    bars_down = plt.bar(x - width / 2, down_f1s, width, label="Down", color="#4C72B0")
+    bars_up   = plt.bar(x + width / 2, up_f1s,   width, label="Up",   color="#DD8452")
+
+    for bar in bars_down + bars_up:
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.005,
+            f"{bar.get_height():.3f}",
+            ha="center", va="bottom", fontsize=9,
+        )
+
+    plt.axhline(y=0.5, color="red", linestyle="--", linewidth=1.2, label="Random Baseline")
+    plt.xticks(x, models)
+    plt.ylim(0, 0.85)
+    plt.ylabel("F1-score")
+    plt.title("Per-Class F1-score by Model (Down vs Up)")
+    plt.legend()
+    plt.tight_layout()
+
+    save_path = os.path.join(RESULT_DIR, "per_class_f1.png")
+    plt.savefig(save_path, dpi=150)
+    plt.show()
+    print(f"저장 완료: {save_path}")
+
+
+def plot_model_agreement(pred_data, y_test):
+    """2개 이상 / 3개 모두 Up 동의 시 정밀도 분석"""
+    model_names = get_model_names(pred_data)
+    preds = {n: pred_data[n] for n in model_names}
+
+    agree_counts = sum(preds[n] for n in model_names)  # 0~3 사이 값
+
+    labels  = ["1개 이상 Up", "2개 이상 Up", "3개 모두 Up"]
+    threshs = [1, 2, 3]
+    precisions, coverages = [], []
+
+    for t in threshs:
+        mask = agree_counts >= t
+        if mask.sum() == 0:
+            precisions.append(0.0)
+            coverages.append(0.0)
+        else:
+            precisions.append(float(y_test[mask].mean()))
+            coverages.append(float(mask.mean()))
+
+    x = np.arange(len(labels))
+    width = 0.35
+
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    ax2 = ax1.twinx()
+
+    bars = ax1.bar(x - width / 2, precisions, width, label="Up Precision", color="#55A868")
+    ax2.bar(x + width / 2, coverages, width, label="Coverage (샘플 비율)", color="#C44E52", alpha=0.7)
+
+    for bar, val in zip(bars, precisions):
+        ax1.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.005,
+            f"{val:.3f}",
+            ha="center", va="bottom", fontsize=9,
+        )
+
+    ax1.axhline(y=0.5, color="red", linestyle="--", linewidth=1.2, label="Random Baseline")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels)
+    ax1.set_ylim(0, 0.85)
+    ax1.set_ylabel("Up Precision")
+    ax2.set_ylim(0, 1)
+    ax2.set_ylabel("Coverage")
+    plt.title("Model Agreement Analysis: Up Precision vs Coverage")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+
+    plt.tight_layout()
+
+    save_path = os.path.join(RESULT_DIR, "model_agreement.png")
+    plt.savefig(save_path, dpi=150)
+    plt.show()
+    print(f"저장 완료: {save_path}")
 
 
 def plot_prediction_distribution(pred_data):
@@ -239,6 +344,8 @@ def main():
     print(df_summary.to_string(index=False))
 
     plot_metric_bar(df_metrics)
+    plot_per_class_f1(pred_data, y_test)
+    plot_model_agreement(pred_data, y_test)
     plot_confusion_matrices(pred_data, y_test)
     plot_prediction_distribution(pred_data)
 
