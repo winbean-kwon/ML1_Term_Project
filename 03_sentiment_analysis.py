@@ -12,35 +12,42 @@ import os
 from config import DATA_DIR, NEWS_PATH
 
 
-MODEL_NAME = "ProsusAI/finbert"
+MODEL_NAME = "snunlp/KR-FinBert-SC"
 
 
 def load_finbert():
-    """FinBERT 모델과 토크나이저 로드"""
+    """KR-FinBERT 모델과 토크나이저 로드 (한국어 금융 특화)"""
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
     model.eval()
-    return tokenizer, model
+
+    # 모델별 레이블 인덱스를 동적으로 파악
+    id2label  = model.config.id2label
+    label2idx = {v.lower(): k for k, v in id2label.items()}
+    pos_idx = label2idx.get("positive", label2idx.get("긍정", 0))
+    neg_idx = label2idx.get("negative", label2idx.get("부정", 1))
+    neu_idx = label2idx.get("neutral",  label2idx.get("중립", 2))
+    print(f"KR-FinBERT 레이블 매핑: {id2label}")
+
+    return tokenizer, model, pos_idx, neg_idx, neu_idx
 
 
-def predict_sentiment(texts: list, tokenizer, model, batch_size=32) -> list:
-    """텍스트 리스트에 대해 감성 점수를 반환합니다.
-    Returns: list of dict with keys: positive, negative, neutral
-    """
+def predict_sentiment(texts: list, tokenizer, model, batch_size=32,
+                      pos_idx=0, neg_idx=1, neu_idx=2) -> list:
+    """텍스트 리스트에 대해 감성 점수를 반환합니다."""
     results = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
         inputs = tokenizer(batch, padding=True, truncation=True,
-                           max_length=512, return_tensors="pt")
+                           max_length=128, return_tensors="pt")
         with torch.no_grad():
             outputs = model(**inputs)
         probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
-        # FinBERT labels: positive, negative, neutral
         for p in probs:
             results.append({
-                "positive": p[0].item(),
-                "negative": p[1].item(),
-                "neutral": p[2].item(),
+                "positive": p[pos_idx].item(),
+                "negative": p[neg_idx].item(),
+                "neutral":  p[neu_idx].item(),
             })
     return results
 
@@ -119,14 +126,15 @@ def main():
     df_news = df_news.dropna(subset=["제목"])
     print(f"뉴스 {len(df_news)}건 로드")
 
-    # FinBERT 로드
-    print("FinBERT 로드 중...")
-    tokenizer, model = load_finbert()
+    # KR-FinBERT 로드
+    print("KR-FinBERT 로드 중...")
+    tokenizer, model, pos_idx, neg_idx, neu_idx = load_finbert()
 
     # 감성 분석 수행
     texts = df_news["제목"].tolist()
     print(f"감성 분석 수행 중... ({len(texts)}건)")
-    sentiments = predict_sentiment(texts, tokenizer, model)
+    sentiments = predict_sentiment(texts, tokenizer, model,
+                                   pos_idx=pos_idx, neg_idx=neg_idx, neu_idx=neu_idx)
 
     df_news["sentiment_pos"] = [s["positive"] for s in sentiments]
     df_news["sentiment_neg"] = [s["negative"] for s in sentiments]
